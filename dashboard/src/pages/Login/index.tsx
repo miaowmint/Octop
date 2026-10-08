@@ -1,12 +1,20 @@
 import { useState, useEffect, useRef, type ReactNode } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Input, Button } from "antd";
+import { Input, Button, Checkbox } from "antd";
 import { message } from "@/utils/antdMessage";
 
 import { KeyRound, Lock, User } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { clearAuthToken, setAuthToken } from "../../api";
-import { authApi, type OauthProviderStatus } from "../../api/modules/auth";
+import {
+  clearAuthToken,
+  setAuthToken,
+  setRememberLoginPreference,
+} from "../../api";
+import {
+  authApi,
+  type LdapStatus,
+  type OauthProviderStatus,
+} from "../../api/modules/auth";
 import { apiErrorMessage } from "../../utils/apiError";
 import { refreshServerLabels } from "../../i18n";
 import { applyUserLocale, applyGuestLocale } from "../../utils/locale";
@@ -22,6 +30,7 @@ import dingtalkIcon from "../../assets/channels/dingtalk.svg";
 import wecomIcon from "../../assets/channels/wecom.svg";
 import googleIcon from "../../assets/providers/google.svg";
 import CaptchaField, { type CaptchaFieldHandle } from "./CaptchaField";
+import ForgotPasswordModal from "./ForgotPasswordModal";
 import { type PublicCaptchaConfig } from "./captchaAdapters";
 
 function providerLabel(
@@ -70,11 +79,14 @@ export default function LoginPage() {
   const [searchParams] = useSearchParams();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [remember, setRemember] = useState(true);
   const [loading, setLoading] = useState(false);
   const [providers, setProviders] = useState<OauthProviderStatus[]>([]);
+  const [ldap, setLdap] = useState<LdapStatus | null>(null);
   const [ssoLoadingKind, setSsoLoadingKind] = useState<string | null>(null);
   const [captchaReady, setCaptchaReady] = useState(false);
   const [captchaResetKey, setCaptchaResetKey] = useState(0);
+  const [showForgotHelp, setShowForgotHelp] = useState(false);
   const [captcha, setCaptcha] = useState<PublicCaptchaConfig>({
     provider: "slider",
   });
@@ -102,6 +114,12 @@ export default function LoginPage() {
             if (!cancelled) {
               setProviders(next.providers.filter((item) => item.enabled));
             }
+          })
+          .catch(() => {});
+        authApi
+          .getLdapStatus()
+          .then((next) => {
+            if (!cancelled) setLdap(next);
           })
           .catch(() => {});
         authApi
@@ -152,6 +170,9 @@ export default function LoginPage() {
         }
         return;
       }
+      if (event.data.access_token) {
+        setAuthToken(event.data.access_token, event.data.remember ?? true);
+      }
       window.location.replace(event.data.redirect || "/chat");
     };
     window.addEventListener("message", onMessage);
@@ -165,6 +186,7 @@ export default function LoginPage() {
 
   const onSso = async (kind: string) => {
     setSsoLoadingKind(kind);
+    setRememberLoginPreference(remember);
     let popup: Window | null = null;
     if (kind !== "oidc") {
       popup = openSsoPopup();
@@ -201,7 +223,7 @@ export default function LoginPage() {
     try {
       const token = await captchaRef.current?.getToken();
       const res = await authApi.login(username, password, token);
-      setAuthToken(res.access_token);
+      setAuthToken(res.access_token, remember);
       await applyUserLocale(res.user.locale);
       void refreshServerLabels(res.user.locale);
       navigate("/chat", { replace: true });
@@ -221,9 +243,12 @@ export default function LoginPage() {
     <div
       style={{
         minHeight: "100dvh",
+        boxSizing: "border-box",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
+        padding:
+          "max(24px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(24px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px))",
         background: "var(--fn-bg-layout)",
         transition: "background var(--fn-transition)",
       }}
@@ -245,7 +270,9 @@ export default function LoginPage() {
         }}
       >
         <img
-          src={isDark ? "/logo_name_dark.png" : "/logo_name.png"}
+          src={
+            isDark ? "/logo_horizontal_white.png" : "/logo_horizontal_dark.png"
+          }
           alt="Octop"
           style={{
             height: 48,
@@ -268,17 +295,31 @@ export default function LoginPage() {
           {t("login.title")}
         </h2>
 
-        <Input
-          prefix={
-            <User size={16} style={{ color: "var(--fn-text-quaternary)" }} />
-          }
-          placeholder={t("login.username")}
-          size="large"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          autoFocus
-          style={{ borderRadius: 10 }}
-        />
+        <div style={{ width: "100%" }}>
+          <Input
+            prefix={
+              <User size={16} style={{ color: "var(--fn-text-quaternary)" }} />
+            }
+            placeholder={t("login.username")}
+            size="large"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoFocus
+            aria-describedby="login-username-hint"
+            style={{ borderRadius: 10 }}
+          />
+          <div
+            id="login-username-hint"
+            style={{
+              marginTop: 6,
+              fontSize: 12,
+              color: "var(--fn-text-tertiary)",
+              lineHeight: 1.4,
+            }}
+          >
+            {t("login.usernameHint")}
+          </div>
+        </div>
 
         <Input.Password
           prefix={
@@ -291,6 +332,24 @@ export default function LoginPage() {
           onPressEnter={handleLogin}
           style={{ borderRadius: 10 }}
         />
+
+        {ldap?.enabled && (
+          <p
+            style={{
+              margin: 0,
+              marginTop: -8,
+              width: "100%",
+              fontSize: 12,
+              lineHeight: 1.5,
+              color: "var(--fn-text-tertiary)",
+              textAlign: "center",
+            }}
+          >
+            {t("login.ldapHint", {
+              name: ldap.display_name.trim() || t("adminSso.ldap.kind"),
+            })}
+          </p>
+        )}
 
         <CaptchaField
           ref={captchaRef}
@@ -313,6 +372,59 @@ export default function LoginPage() {
         >
           {t("login.submit")}
         </Button>
+
+        <div
+          style={{
+            width: "100%",
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              width: "100%",
+            }}
+          >
+            <Checkbox
+              checked={remember}
+              onChange={(e) => setRemember(e.target.checked)}
+              style={{
+                margin: 0,
+                fontSize: 13,
+                color: "var(--fn-text-tertiary)",
+              }}
+            >
+              {t("login.remember")}
+            </Checkbox>
+            <button
+              type="button"
+              data-testid="login-forgot-password-toggle"
+              onClick={() => setShowForgotHelp(true)}
+              style={{
+                margin: 0,
+                padding: 0,
+                border: "none",
+                background: "none",
+                cursor: "pointer",
+                fontSize: 13,
+                lineHeight: 1.5,
+                color: "var(--fn-text-tertiary)",
+                flexShrink: 0,
+              }}
+            >
+              {t("login.forgotPassword", "Forgot password?")}
+            </button>
+          </div>
+          <ForgotPasswordModal
+            open={showForgotHelp}
+            onClose={() => setShowForgotHelp(false)}
+          />
+        </div>
 
         {providers.length > 0 && (
           <>

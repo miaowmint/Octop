@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import pytest
-from harness_agent.backends.utils import BackendOperationNotSupportedError
+from octop_harness.backends.utils import BackendOperationNotSupportedError
 
-from octop.infra.agents.avatar import (
+from octop.infra.agents.experts.avatar import (
     MAX_AVATAR_BYTES,
     agent_avatar_api_path,
     delete_workspace_avatar,
@@ -106,6 +106,22 @@ def test_read_snapshot_avatar_and_display_url(tmp_path) -> None:
         )
         is None
     )
+    assert (
+        display_published_expert_icon_url(
+            expert_id="pexp1",
+            snapshot_dir=tmp_path,
+            fallback_icon_url="/experts/avatars/scene-healthcare.svg",
+        )
+        == "/experts/avatars/scene-healthcare.svg"
+    )
+    assert (
+        display_published_expert_icon_url(
+            expert_id="pexp1",
+            snapshot_dir=tmp_path,
+            fallback_icon_url="/api/agents/agt1/avatar?v=1",
+        )
+        is None
+    )
 
     avatar = tmp_path / ".octop" / "avatar.png"
     avatar.parent.mkdir(parents=True)
@@ -119,6 +135,7 @@ def test_read_snapshot_avatar_and_display_url(tmp_path) -> None:
             expert_id="pexp1",
             snapshot_dir=tmp_path,
             updated_at="2026-01-01T00:00:00Z",
+            fallback_icon_url="/experts/avatars/scene-healthcare.svg",
         )
         == "/api/experts/published/pexp1/avatar?v=2026-01-01T00:00:00Z"
     )

@@ -37,7 +37,6 @@ import { prepareSpeechText } from "../../../utils/plainTextForSpeech";
 import {
   chatStreamErrorAction,
   formatChatStreamError,
-  isChatStreamError,
 } from "../../../utils/chatStreamError";
 import { MessageFileCard } from "./MessageFileCard";
 import AskQuestionCard from "./AskQuestionCard";
@@ -46,16 +45,24 @@ import MessageSender, { ExpertMessageAvatar } from "./MessageSender";
 import { useCurrentUser } from "../../../hooks/useCurrentUser";
 import { useAgent } from "../../../context/AgentContext";
 import {
-  accountDisplayName,
-  accountInitials,
-} from "../utils/accountDisplayName";
-import { extractAskQuestions, isAskHitl } from "../../../api/types/hitl";
+  isTeamAgent,
+  isTeamHostSpeaker as isTeamHostSpeakerId,
+} from "../../../utils/teamAgent";
+import { rewritePeerSpeakerId } from "../../../utils/remoteExpert";
+import { accountDisplayName } from "../utils/accountDisplayName";
+import { ProfileAvatar } from "../../Admin/Users/ProfileAvatar";
+import {
+  extractAskQuestions,
+  isAskHitl,
+  type HitlDecisionHandler,
+} from "../../../api/types/hitl";
 import styles from "../index.module.less";
 import {
   DefaultToolRenderer,
   builtinPluginHost,
   createPluginUiHost,
   parseOctopToolOutput,
+  resolvePluginUiData,
   resolveToolRenderer,
   useToolRendererVersion,
   type ToolRenderProps,
@@ -78,9 +85,7 @@ interface MessageBubbleProps {
   onForkAssistantMessage?: (messageId: string) => void;
   forkDisabled?: boolean;
   forkDisabledHint?: string;
-  onHitlDecision?: (
-    decisions: Array<{ type: string; message?: string }>,
-  ) => void;
+  onHitlDecision?: HitlDecisionHandler;
 
   /** When true, the outer bubble uses reduced spacing (part of a group). */
   compact?: boolean;
@@ -373,6 +378,11 @@ export function ToolDetailsInline({
     () => parseOctopToolOutput(toolData.output),
     [toolData.output],
   );
+  // Offloaded octop_ui payloads: explicit data wins; data_ref → artifact.
+  const resolvedData = useMemo(
+    () => resolvePluginUiData(parsed, toolData.artifact, toolData.output),
+    [parsed, toolData.artifact, toolData.output],
+  );
   const pluginId =
     toolData.pluginId ?? lookupPluginIdForTool(toolData.name) ?? "builtin";
 
@@ -409,12 +419,7 @@ export function ToolDetailsInline({
     callId: toolData.callId,
     status,
     args,
-    data:
-      parsed.data !== undefined
-        ? parsed.data
-        : parsed.isJson
-        ? parsed.raw
-        : toolData.output,
+    data: resolvedData,
     textFallback: parsed.text,
     host:
       registration && registration.pluginId !== "builtin"
@@ -545,12 +550,29 @@ function MessageBubble({
   const serverTimezone = useServerTimezone();
   const user = useCurrentUser();
   const { agents, activeAgent } = useAgent();
+  const isTeamRoom = isTeamAgent(activeAgent);
+  const speakerId =
+    rewritePeerSpeakerId(
+      activeAgent?.agent_id,
+      message.speakerAgentId || agentId,
+    ) ||
+    message.speakerAgentId ||
+    agentId;
+  const isTeamHostSpeaker = isTeamHostSpeakerId(
+    isTeamRoom,
+    speakerId,
+    activeAgent?.agent_id,
+  );
   const expert = useMemo(
     () =>
-      (agentId && agents.find((item) => item.agent_id === agentId)) ||
-      activeAgent,
-    [agentId, agents, activeAgent],
+      (speakerId && agents.find((item) => item.agent_id === speakerId)) ||
+      (isTeamHostSpeaker || !isTeamRoom ? activeAgent : undefined),
+    [speakerId, agents, activeAgent, isTeamHostSpeaker, isTeamRoom],
   );
+  const avatarTooltip = isTeamHostSpeaker
+    ? t("chat.teamHostHover", { name: activeAgent?.name || expert?.name || "" })
+    : expert?.name;
+  const avatarProfileId = isTeamHostSpeaker ? activeAgent?.agent_id : speakerId;
   const userName = accountDisplayName(user);
 
   const [isEditing, setIsEditing] = useState(false);
@@ -607,9 +629,9 @@ function MessageBubble({
     const actions = message.hitlData.action_requests ?? [];
     const hitlStatus = message.hitlData.status ?? "pending";
     if (isAskHitl(actions)) {
-      // Pending questions are rendered in ChatPage's composer dock so they
-      // stay immediately above the input even when message history scrolls.
-      if (hitlStatus === "pending") return null;
+      // Recoverable pending questions stay in ChatPage's composer dock.
+      // Reconstructed history without pending_id stays in the transcript.
+      if (hitlStatus === "pending" && message.hitlData.pending_id) return null;
       const questions = extractAskQuestions(actions);
       return (
         <div
@@ -618,21 +640,7 @@ function MessageBubble({
           }`}
         >
           <div className={styles.bubbleContent}>
-            <AskQuestionCard
-              questions={questions}
-              status={hitlStatus}
-              onSubmit={
-                onHitlDecision
-                  ? (answer) =>
-                      onHitlDecision(
-                        actions.map(() => ({
-                          type: "respond",
-                          message: answer,
-                        })),
-                      )
-                  : undefined
-              }
-            />
+            <AskQuestionCard questions={questions} status={hitlStatus} />
           </div>
         </div>
       );
@@ -647,6 +655,7 @@ function MessageBubble({
           <HitlApprovalCard
             actions={actions}
             status={hitlStatus}
+            resolution={message.hitlData.resolution}
             onDecision={onHitlDecision}
           />
         </div>
@@ -659,9 +668,7 @@ function MessageBubble({
     isUser && !isEditing && hasUserComposerTags(message.composerContext);
   const isStreaming = message.status === "streaming";
   const hasToolData = !!message.toolData;
-  const looksLikeStreamError =
-    !isUser && !hasToolData && !isStreaming && isChatStreamError(textContent);
-  const isError = message.status === "error" || looksLikeStreamError;
+  const isError = message.status === "error";
   const errorBodyText = isError
     ? formatChatStreamError(textContent, t)
     : textContent;
@@ -732,17 +739,22 @@ function MessageBubble({
     <MessageSender
       name={userName}
       avatar={
-        <span className={styles.msgUserAvatar}>
-          {accountInitials(userName)}
-        </span>
+        <ProfileAvatar
+          url={user?.avatar_url}
+          icon={user?.avatar_icon}
+          kind="user"
+          className={styles.msgUserAvatar}
+        />
       }
     />
-  ) : expert ? (
+  ) : expert || avatarProfileId ? (
     <ExpertMessageAvatar
-      name={expert.name}
-      color={expert.color}
-      iconName={expert.icon_name}
-      iconUrl={expert.icon_url}
+      name={expert?.name || avatarProfileId}
+      color={expert?.color}
+      iconName={expert?.icon_name}
+      iconUrl={expert?.icon_url}
+      tooltip={avatarTooltip}
+      profileAgentId={avatarProfileId}
     />
   ) : null;
 

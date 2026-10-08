@@ -28,6 +28,11 @@ import { isAgentChatReady } from "../../../utils/agentError";
 import { useAgentFormResources } from "../../../hooks/useAgentFormResources";
 import { octopAgentsApi } from "../../../api/modules/octopAgents";
 import { useAgent, type OctopAgent } from "../../../context/AgentContext";
+import {
+  CONVERSATION_MODES,
+  parseConversationMode,
+  type ConversationMode,
+} from "../../Chat/utils/conversationMode";
 import ExpertAvatarPicker from "./ExpertAvatarPicker";
 import WorkspaceDrawer from "../../Agent/Workspace/components/WorkspaceDrawer";
 import {
@@ -76,6 +81,7 @@ import {
 } from "./agentBackendForm";
 import AgentBackendFields from "./AgentBackendFields";
 import ExpertComposerDefaultsFields from "./ExpertComposerDefaultsFields";
+import SkillCatalogDrawer from "./SkillCatalogDrawer";
 import SubagentCatalogDrawer from "./SubagentCatalogDrawer";
 import styles from "../index.module.less";
 
@@ -131,6 +137,7 @@ interface EditFormValues {
   welcome_message?: string;
   is_shared?: boolean;
   default_model: string;
+  conversation_mode: ConversationMode;
   backend_choice: string;
   composite_default: string;
   root_dir?: string;
@@ -250,6 +257,7 @@ function EditAgentDrawerBody({
   );
   const [listRenameSaving, setListRenameSaving] = useState(false);
   const [subagentCatalogOpen, setSubagentCatalogOpen] = useState(false);
+  const [skillCatalogOpen, setSkillCatalogOpen] = useState(false);
   const welcomeConfigRef = useRef<WelcomeConfigRef>(null);
 
   const installedSubagentSlugs = useMemo(
@@ -305,6 +313,7 @@ function EditAgentDrawerBody({
             typeof ag.welcome_message === "string" ? ag.welcome_message : "",
           is_shared: agent.is_shared ?? false,
           default_model: defaultModelToForm(ag.default_model),
+          conversation_mode: parseConversationMode(cfg.conversation_mode),
           backend_choice: parsedBackend.backendChoice,
           composite_default: parsedBackend.compositeDefault,
           root_dir: parsedBackend.rootDir,
@@ -424,6 +433,7 @@ function EditAgentDrawerBody({
         ...agentConfig,
         backend: backendSpec,
         enable_trajectory: values.enable_trajectory === true,
+        conversation_mode: values.conversation_mode,
       });
       delete nextConfig.color;
       delete nextConfig.icon_name;
@@ -797,6 +807,18 @@ function EditAgentDrawerBody({
                 <Switch />
               </Form.Item>
               <Form.Item
+                name="conversation_mode"
+                label={t("experts.defaultModeLabel")}
+                tooltip={t("experts.defaultModeHint")}
+              >
+                <Select
+                  options={CONVERSATION_MODES.map((mode) => ({
+                    value: mode,
+                    label: t(`chat.conversationMode.${mode}`),
+                  }))}
+                />
+              </Form.Item>
+              <Form.Item
                 name="default_model"
                 label={t("experts.defaultModelLabel")}
               >
@@ -1003,9 +1025,33 @@ function EditAgentDrawerBody({
                   },
                   {
                     key: "skills",
-                    label: t("experts.skillFilesTitle", {
-                      count: agentSkills.length,
-                    }),
+                    label: (
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          width: "100%",
+                        }}
+                      >
+                        <span>
+                          {t("experts.skillFilesTitle", {
+                            count: agentSkills.length,
+                          })}
+                        </span>
+                        <Button
+                          type="link"
+                          size="small"
+                          style={{ padding: 0, height: "auto" }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSkillCatalogOpen(true);
+                          }}
+                        >
+                          {t("experts.manageSkills")}
+                        </Button>
+                      </div>
+                    ),
                     children: (
                       <>
                         <p
@@ -1015,7 +1061,7 @@ function EditAgentDrawerBody({
                             margin: "0 0 8px",
                           }}
                         >
-                          {t("experts.skillFilesHint")}
+                          {t("experts.skillFilesEditHint")}
                         </p>
                         <div className={styles.fileList}>
                           {agentSkills.length === 0 ? (
@@ -1256,6 +1302,14 @@ function EditAgentDrawerBody({
         onClose={() => setSubagentCatalogOpen(false)}
         onInstalled={() => {
           void reloadSubagents();
+        }}
+      />
+      <SkillCatalogDrawer
+        agentId={agent.agent_id}
+        open={skillCatalogOpen}
+        onClose={() => {
+          setSkillCatalogOpen(false);
+          void reloadSkills();
         }}
       />
       <Modal

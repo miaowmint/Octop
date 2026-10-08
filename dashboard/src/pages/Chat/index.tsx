@@ -5,6 +5,7 @@ import { useNavigate, useParams, useLocation } from "react-router-dom";
 import {
   PanelLeftOpen,
   GraduationCap,
+  Users,
   Globe,
   FilePen,
   Terminal,
@@ -14,10 +15,11 @@ import {
 import { Alert, Button, Tooltip } from "antd";
 import { message as antMessage } from "@/utils/antdMessage";
 import { showConfirmModal } from "../../utils/confirmModal";
-
+import PlanReadyCard from "./components/PlanReadyCard";
 import { useIsMobile } from "../../hooks/useIsMobile";
+import { useHitlEnabled } from "../../hooks/useHitlEnabled";
 import { useCurrentUser } from "../../hooks/useCurrentUser";
-import { userCan } from "../../utils/permissions";
+import { navAllowed, userCan } from "../../utils/permissions";
 import { useChat } from "./hooks/useChat";
 import { useSessions, fetchAndSyncSessionArtifacts } from "./hooks/useSessions";
 import * as chatStore from "./hooks/chatStore";
@@ -35,6 +37,11 @@ import { useChatNavigation } from "./hooks/useChatNavigation";
 import { useChatSessionActions } from "./hooks/useChatSessionActions";
 
 import { useChatComposerResources } from "./hooks/useChatComposerResources";
+import type { HitlSessionPolicy } from "./utils/hitlSessionPolicy";
+import {
+  mergeAllowTools,
+  parseHitlSessionPolicy,
+} from "./utils/hitlSessionPolicy";
 import { useChatContextWindow } from "./hooks/useChatContextWindow";
 import { useBrowserToolDetection } from "./hooks/useBrowserToolDetection";
 import { useSkillRecordingWorkflow } from "./hooks/useSkillRecordingWorkflow";
@@ -52,8 +59,8 @@ import MessageList from "./components/MessageList";
 import ChatInput, { type ChatInputHandle } from "./components/ChatInput";
 import WelcomeScreen from "./components/WelcomeScreen";
 import AgentNotReadyScreen from "./components/AgentNotReadyScreen";
+import ModelConfigEmpty from "./components/ModelConfigEmpty";
 import AgentProfileDrawer from "../../components/AgentProfileDrawer";
-import WorkspaceDrawer from "../Agent/Workspace/components/WorkspaceDrawer";
 import TrajectoryDrawer from "./components/TrajectoryDrawer";
 import { useExpertChatWelcome } from "./hooks/useExpertQuickCards";
 import { useSkills } from "../Agent/Skills/useSkills";
@@ -70,7 +77,9 @@ import {
   chatSkillCatalogAgentId,
   isSharedExpertViewer,
 } from "../../utils/sharedExpert";
+import { isTeamAgent } from "../../utils/teamAgent";
 import ChatDockPanels from "./components/ChatDockPanels";
+import type { ChatDockAddTabHandlers } from "./components/ChatDockPanel";
 import { ChatFilePreviewProvider } from "./ChatFilePreviewContext";
 import { ChatAgentProfileProvider } from "./ChatAgentProfileContext";
 import {
@@ -79,9 +88,15 @@ import {
 } from "./ChatToolDockContext";
 import ChatSidebarPanel from "./components/ChatSidebarPanel";
 import ChatTitleBar from "./components/ChatTitleBar";
+import TeamChatBadge from "./components/TeamChatBadge";
 import ChatComposerChrome from "./components/ChatComposerChrome";
 import AskQuestionCard from "./components/AskQuestionCard";
-import { findPendingAsk, hasPendingHitl } from "./utils/pendingHitl";
+import {
+  findAutoResumableApproval,
+  findPendingAsk,
+  hasPendingHitl,
+  isResumableHitl,
+} from "./utils/pendingHitl";
 import { isAgentChatReady } from "../../utils/agentError";
 import { useMemoryMaintenance } from "./hooks/useMemoryMaintenance";
 import MemoryMaintenanceBanner from "./components/MemoryMaintenanceBanner";
@@ -115,10 +130,12 @@ function ChatPageInner() {
     threadId: threadId ?? null,
   });
   const isMobile = useIsMobile();
+  const hitlEnabled = useHitlEnabled();
   const user = useCurrentUser();
   const { layoutMode } = useLayoutMode();
   const isMinimalLayout = layoutMode === "minimal";
   const canTerminal = userCan(user, "terminal");
+  const canConfigureModels = navAllowed(user, "models");
   const chatHistoryRail = useChatHistoryRail();
   const [browserRecording, setBrowserRecording] = useState(false);
   const [browserRecordingId, setBrowserRecordingId] = useState<string | null>(
@@ -187,10 +204,33 @@ function ChatPageInner() {
     () => agents.find((a) => a.agent_id === resolvedAgentId) ?? null,
     [agents, resolvedAgentId],
   );
-  const agentChatReady = isAgentChatReady(activeAgent?.state);
+  const agentChatReady = isAgentChatReady(activeAgent?.state, activeAgent);
   const trajectoryEnabled =
     activeAgent !== null && activeAgent.config?.enable_trajectory !== false;
   const sharedExpertViewer = isSharedExpertViewer(activeAgent ?? {});
+  const isTeamChat = isTeamAgent(activeAgent);
+  const [agentProfileOpen, setAgentProfileOpen] = useState(false);
+  const [profileAgentId, setProfileAgentId] = useState<string | null>(null);
+  const profileAgent = useMemo(() => {
+    if (!profileAgentId || profileAgentId === activeAgent?.agent_id) {
+      return activeAgent;
+    }
+    const found = agents.find((item) => item.agent_id === profileAgentId);
+    if (found) return found;
+    if (!activeAgent) return null;
+    return {
+      ...activeAgent,
+      agent_id: profileAgentId,
+      name: profileAgentId,
+      kind: "expert",
+      member_ids: undefined,
+      description: null,
+    };
+  }, [profileAgentId, agents, activeAgent]);
+  const profileOpenLabel = isTeamChat
+    ? t("chat.agentProfile.openTeam")
+    : t("chat.agentProfile.open");
+  const ProfileIcon = isTeamChat ? Users : GraduationCap;
   const noAgents = !agentsLoading && agents.length === 0;
 
   // Sidebar only lists "enabled" experts (harness running). Stopped / failed
@@ -207,6 +247,7 @@ function ChatPageInner() {
     status: memoryMaint,
     visible: memoryMaintVisible,
     blocking: memoryMaintBlocking,
+    connectionLost: memoryMaintConnectionLost,
   } = useMemoryMaintenance(resolvedAgentId, agentChatReady && !noAgents);
   const historyMigration = useHistoryMigration(
     resolvedAgentId,
@@ -225,8 +266,6 @@ function ChatPageInner() {
   const chatSubagents = useChatSubagents(
     chatSkillCatalogAgentId(resolvedAgentId, agentChatReady, agentsLoading),
   );
-  const [agentProfileOpen, setAgentProfileOpen] = useState(false);
-  const [workspaceDrawerOpen, setWorkspaceDrawerOpen] = useState(false);
   const [trajectoryDrawerOpen, setTrajectoryDrawerOpen] = useState(false);
   const [turnRailVisible, setTurnRailVisible] = useState(false);
   const {
@@ -267,7 +306,7 @@ function ChatPageInner() {
       return;
     }
     setAgentProfileOpen(false);
-    setWorkspaceDrawerOpen(false);
+    setProfileAgentId(null);
     setTrajectoryDrawerOpen(false);
   }, [resolvedAgentId]);
 
@@ -313,6 +352,8 @@ function ChatPageInner() {
     historyRefreshing,
     historyHydrated,
     contextUsage,
+    pendingPlanPath,
+    liveSpeakers,
     sendMessage,
     editAndResend,
     cancelStream,
@@ -322,13 +363,14 @@ function ChatPageInner() {
     retryHistory,
     clearMessages,
     resumeHitl,
-  } = useChat(activeThreadId, resolvedAgentId);
+  } = useChat(activeThreadId, resolvedAgentId, isTeamChat);
 
   const hasPendingHitlPause = useMemo(
     () => hasPendingHitl(messages),
     [messages],
   );
   const pendingAsk = useMemo(() => findPendingAsk(messages), [messages]);
+  const autoResumedApprovalRef = useRef<string | null>(null);
 
   const refreshBrowserRef = useRef<() => void>(() => {});
 
@@ -344,7 +386,11 @@ function ChatPageInner() {
     controlOwner: browserControlOwner,
     environment: browserEnvironment,
     refresh: refreshBrowserSession,
-  } = useBrowserSessionState(threadId, hasBrowserTool);
+  } = useBrowserSessionState(
+    threadId,
+    hasBrowserTool,
+    activeAgent?.bridge ? activeAgent.bridge_connection_id : null,
+  );
 
   refreshBrowserRef.current = refreshBrowserSession;
 
@@ -361,8 +407,11 @@ function ChatPageInner() {
     openFileList,
     openFileAt,
     openKnowledgeCitation,
+    openWorkspaceTab,
     openBrowserTab,
+    openTerminalTab,
     toggleBrowserPanel,
+    toggleWorkspacePanel,
     toggleTerminalPanel,
     openToolUiTab,
     focusToolUiTab,
@@ -371,38 +420,96 @@ function ChatPageInner() {
   } = useChatDockPanel(isMobile, resolvedAgentId);
 
   const chromeCheckInFlightRef = useRef(false);
-  const handleToggleBrowserPanel = useCallback(async () => {
-    // A live session means Chrome is already running — skip the probe.
-    if (browserSessionId) {
-      toggleBrowserPanel();
-      return;
-    }
-    if (chromeCheckInFlightRef.current) return;
-    chromeCheckInFlightRef.current = true;
-    try {
-      const env = await browserApi.checkEnvStatus();
-      if (shouldJumpToChromeInstall(env)) {
-        showConfirmModal(
-          {
-            title: t("browserWorkspace.chromeMissingTitle"),
-            content: t("browserWorkspace.chromeMissingJumpToInstall"),
-            okText: t("common.confirm"),
-            cancelText: t("common.cancel"),
-            onOk: () => {
-              navigate(WORKBENCH_BROWSER_PATH);
-            },
-          },
-          { isMobile },
-        );
-        return;
+  const bridgeConnectionId =
+    activeAgent?.bridge && activeAgent.bridge_connection_id
+      ? activeAgent.bridge_connection_id
+      : null;
+  const ensureChromeThen = useCallback(
+    async (then: () => void) => {
+      // A live session means Chrome is already running — skip the probe.
+      if (!browserSessionId) {
+        if (chromeCheckInFlightRef.current) return;
+        chromeCheckInFlightRef.current = true;
+        try {
+          const env = await browserApi.checkEnvStatus(resolvedAgentId);
+          if (shouldJumpToChromeInstall(env)) {
+            // Peer Chromium install is not tunneled — only nudge local install UX.
+            if (bridgeConnectionId) {
+              showConfirmModal(
+                {
+                  title: t("browserWorkspace.chromeMissingTitle"),
+                  content: t("chat.remoteExpert.manageToast"),
+                  okText: t("common.confirm"),
+                  cancelText: t("common.cancel"),
+                },
+                { isMobile },
+              );
+              return;
+            }
+            showConfirmModal(
+              {
+                title: t("browserWorkspace.chromeMissingTitle"),
+                content: t("browserWorkspace.chromeMissingJumpToInstall"),
+                okText: t("common.confirm"),
+                cancelText: t("common.cancel"),
+                onOk: () => {
+                  navigate(WORKBENCH_BROWSER_PATH);
+                },
+              },
+              { isMobile },
+            );
+            return;
+          }
+        } catch {
+          // Probe failed — keep the existing open-panel behavior.
+        } finally {
+          chromeCheckInFlightRef.current = false;
+        }
       }
-    } catch {
-      // Probe failed — keep the existing open-panel behavior.
-    } finally {
-      chromeCheckInFlightRef.current = false;
+      then();
+    },
+    [
+      browserSessionId,
+      bridgeConnectionId,
+      isMobile,
+      navigate,
+      resolvedAgentId,
+      t,
+    ],
+  );
+
+  const handleToggleBrowserPanel = useCallback(() => {
+    void ensureChromeThen(toggleBrowserPanel);
+  }, [ensureChromeThen, toggleBrowserPanel]);
+
+  const handleOpenBrowserTab = useCallback(() => {
+    void ensureChromeThen(openBrowserTab);
+  }, [ensureChromeThen, openBrowserTab]);
+
+  const dockAddTab = useMemo((): ChatDockAddTabHandlers => {
+    const handlers: ChatDockAddTabHandlers = {
+      onOpenBrowser: handleOpenBrowserTab,
+    };
+    if (!sharedExpertViewer) {
+      handlers.onOpenWorkspace = openWorkspaceTab;
+      handlers.workspaceDisabled = !agentChatReady;
+      handlers.workspaceDisabledHint = t("workspace.requiresRunning");
+      handlers.onOpenFiles = openFileList;
     }
-    toggleBrowserPanel();
-  }, [browserSessionId, isMobile, navigate, t, toggleBrowserPanel]);
+    if (canTerminal) {
+      handlers.onOpenTerminal = openTerminalTab;
+    }
+    return handlers;
+  }, [
+    agentChatReady,
+    canTerminal,
+    handleOpenBrowserTab,
+    openFileList,
+    openTerminalTab,
+    openWorkspaceTab,
+    sharedExpertViewer,
+    t,
+  ]);
 
   const closeToolUiPanel = useCallback(
     (callId: string) => {
@@ -427,13 +534,27 @@ function ChatPageInner() {
   const panelFilePaths = useMemo(() => {
     const fromTabs = openTabs
       .filter((tab) => tab.kind === "file")
-      .map((tab) => tab.path);
-    const fromThread = composerSession?.artifacts ?? [];
+      .map((tab) => ({
+        path: tab.path,
+        ...(tab.agentId ? { agentId: tab.agentId } : {}),
+      }));
+    const fromThread = (composerSession?.artifacts ?? []).map((item) => ({
+      path: item.path,
+      ...(item.agent_id ? { agentId: item.agent_id } : {}),
+    }));
     return listDockFilePathsForTree(
       [...fromThread, ...fromTabs],
       resolvedAgentId,
     );
   }, [openTabs, resolvedAgentId, composerSession?.artifacts]);
+
+  const dockAgentNameById = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const a of agents) {
+      if (a.agent_id) map[a.agent_id] = a.name || a.agent_id;
+    }
+    return map;
+  }, [agents]);
 
   const {
     selectedModel,
@@ -443,10 +564,15 @@ function ChatPageInner() {
     chatConnectors,
     chatKnowledgeBases,
     availableModels,
+    modelsReady,
     activeModelRef,
     reasoningMode,
     reasoningEffort,
     handleReasoningChange,
+    conversationMode,
+    handleConversationModeChange,
+    hitlPolicy,
+    handleHitlPolicyChange,
     handleConnectorsChange,
     handleKnowledgeBaseIdsChange,
   } = useChatComposerResources(
@@ -455,6 +581,8 @@ function ChatPageInner() {
     composerSession?.modelRef,
     composerSession?.reasoningMode,
     composerSession?.reasoningEffort,
+    composerSession?.conversationMode,
+    composerSession?.hitlPolicy,
   );
 
   const { contextMaxTokens, contextUsedTokens } = useChatContextWindow(
@@ -524,13 +652,32 @@ function ChatPageInner() {
   // Subset for the chat-side *pickers* (`@` button popover, `@` mention menu).
   // Only running experts — picking a stopped one would dispatch into an
   // unloaded harness and silently fail.
-  const chatAgentOptionsPickable = useMemo(
-    () =>
-      selectEnabledExperts(agents, null, { pinActive: false }).map(
-        projectChatAgentOption,
-      ),
-    [agents],
-  );
+  // Bridge sessions: only peers on the same connection (local ask_agent
+  // cannot reach them; peer ask_agent cannot reach local experts).
+  const chatAgentOptionsPickable = useMemo(() => {
+    let list = selectEnabledExperts(agents, null, { pinActive: false }).filter(
+      (item) => !isTeamAgent(item),
+    );
+    if (activeAgent?.bridge && activeAgent.bridge_connection_id) {
+      const cid = activeAgent.bridge_connection_id;
+      list = list.filter(
+        (item) => item.bridge && item.bridge_connection_id === cid,
+      );
+    } else {
+      list = list.filter((item) => !item.bridge);
+    }
+    return list.map(projectChatAgentOption);
+  }, [agents, activeAgent?.bridge, activeAgent?.bridge_connection_id]);
+  const teamExpertOptions = useMemo(() => {
+    if (!isTeamChat) return chatAgentOptionsPickable;
+    const ids = new Set(activeAgent?.member_ids ?? []);
+    return chatAgentOptions.filter((item) => ids.has(item.agent_id));
+  }, [
+    isTeamChat,
+    activeAgent?.member_ids,
+    chatAgentOptions,
+    chatAgentOptionsPickable,
+  ]);
 
   const composerLookups = useMemo(
     () => ({
@@ -552,6 +699,8 @@ function ChatPageInner() {
     selectedKnowledgeBaseIds,
     reasoningMode,
     reasoningEffort,
+    conversationMode,
+    hitlPolicy,
     defaultModel: activeAgent?.default_model ?? null,
     sendMessage,
     createSession,
@@ -707,14 +856,20 @@ function ChatPageInner() {
       if (ev.action === "switch_agent" && ev.agent_id) {
         navigateToAgent(ev.agent_id);
       }
+      if (
+        ev.action === "set_conversation_mode" &&
+        (ev.mode === "ask" || ev.mode === "plan" || ev.mode === "craft")
+      ) {
+        handleConversationModeChange(ev.mode);
+      }
     });
-  }, [navigateToAgent]);
+  }, [navigateToAgent, handleConversationModeChange]);
 
   const handlePromptClick = useCallback(
-    (text: string) => {
+    (text: string, options?: { prefill?: boolean }) => {
       const trimmed = text.trim();
       if (!trimmed) return;
-      if (promptNeedsUserInput(text)) {
+      if (options?.prefill || promptNeedsUserInput(text)) {
         prefillInputRef.current = trimmed;
         chatInputRef.current?.setPrefillText(trimmed);
         return;
@@ -732,11 +887,72 @@ function ChatPageInner() {
   );
 
   const handleHitlDecision = useCallback(
-    (decisions: Array<{ type: string; message?: string }>) => {
+    (
+      decisions: Array<{ type: string; message?: string }>,
+      policy?: HitlSessionPolicy,
+    ) => {
+      if (policy) {
+        const next =
+          policy.mode === "allow_tools"
+            ? mergeAllowTools(hitlPolicy, policy.tools ?? [])
+            : policy;
+        const pending = findAutoResumableApproval(next, messages);
+        if (pending && activeThreadId) {
+          autoResumedApprovalRef.current = `${activeThreadId}:${pending.messageId}`;
+        }
+        handleHitlPolicyChange(next, { persist: false });
+        resumeHitl(decisions, activeThreadId ?? undefined, undefined, next);
+        return;
+      }
       resumeHitl(decisions, activeThreadId ?? undefined);
     },
-    [resumeHitl, activeThreadId],
+    [resumeHitl, activeThreadId, handleHitlPolicyChange, hitlPolicy, messages],
   );
+
+  const handleComposerHitlPolicyChange = useCallback(
+    (policy: HitlSessionPolicy) => {
+      const pending = findAutoResumableApproval(policy, messages);
+      handleHitlPolicyChange(policy, { persist: !pending });
+      if (!pending) return;
+      if (activeThreadId) {
+        autoResumedApprovalRef.current = `${activeThreadId}:${pending.messageId}`;
+      }
+      resumeHitl(
+        pending.actions.map(() => ({ type: "approve" })),
+        activeThreadId ?? undefined,
+        undefined,
+        policy,
+      );
+    },
+    [handleHitlPolicyChange, messages, resumeHitl, activeThreadId],
+  );
+
+  useEffect(() => {
+    if (isStreaming || !activeThreadId) return;
+    const sessionPolicy = parseHitlSessionPolicy(composerSession?.hitlPolicy);
+    const pending = findAutoResumableApproval(sessionPolicy, messages);
+    if (!pending) {
+      autoResumedApprovalRef.current = null;
+      return;
+    }
+    const card = messages.find((message) => message.id === pending.messageId);
+    if (!isResumableHitl(card?.hitlData)) return;
+    const resumeKey = `${activeThreadId}:${pending.messageId}`;
+    if (autoResumedApprovalRef.current === resumeKey) return;
+    autoResumedApprovalRef.current = resumeKey;
+    resumeHitl(
+      pending.actions.map(() => ({ type: "approve" })),
+      activeThreadId,
+      undefined,
+      sessionPolicy,
+    );
+  }, [
+    composerSession?.hitlPolicy,
+    messages,
+    activeThreadId,
+    resumeHitl,
+    isStreaming,
+  ]);
 
   /** Close an ask pause without answering: ``respond`` is the only decision
    *  the agent allows for ``ask_user_question``, so tell it to wrap up. */
@@ -1058,7 +1274,10 @@ function ChatPageInner() {
                     className={styles.mobileTitle}
                     title={activeSessionTitle}
                   >
-                    {activeSessionTitle}
+                    <span className={styles.mobileTitleText}>
+                      {activeSessionTitle}
+                    </span>
+                    <TeamChatBadge show={isTeamChat} />
                   </div>
                 )}
                 {resolvedAgentId && !sharedExpertViewer && (
@@ -1066,14 +1285,14 @@ function ChatPageInner() {
                     <button
                       className={styles.menuBtn}
                       onClick={() => setAgentProfileOpen(true)}
-                      title={t("chat.agentProfile.open")}
-                      aria-label={t("chat.agentProfile.open")}
+                      title={profileOpenLabel}
+                      aria-label={profileOpenLabel}
                     >
-                      <GraduationCap size={18} strokeWidth={1.8} />
+                      <ProfileIcon size={18} strokeWidth={1.8} />
                     </button>
                     <button
                       className={styles.menuBtn}
-                      onClick={() => setWorkspaceDrawerOpen(true)}
+                      onClick={toggleWorkspacePanel}
                       disabled={!agentChatReady}
                       title={
                         agentChatReady
@@ -1084,6 +1303,30 @@ function ChatPageInner() {
                     >
                       <FolderOpen size={18} strokeWidth={1.8} />
                     </button>
+                    <button
+                      className={styles.menuBtn}
+                      onClick={() => void handleToggleBrowserPanel()}
+                      title={t("chat.openBrowser")}
+                      aria-label={t("chat.openBrowser")}
+                    >
+                      <Globe size={18} strokeWidth={1.8} />
+                    </button>
+                    {!sharedExpertViewer && panelFilePaths.length > 0 && (
+                      <button
+                        className={styles.menuBtn}
+                        onClick={() => openFileList()}
+                        title={t("chat.modifiedFiles", {
+                          count: panelFilePaths.length,
+                          defaultValue: "已修改文件（{{count}}）",
+                        })}
+                        aria-label={t("chat.modifiedFiles", {
+                          count: panelFilePaths.length,
+                          defaultValue: "已修改文件（{{count}}）",
+                        })}
+                      >
+                        <FilePen size={18} strokeWidth={1.8} />
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -1099,6 +1342,7 @@ function ChatPageInner() {
                 onDelete={handleDeleteSession}
                 forkDisabled={sessionForkDisabled}
                 forkDisabledHint={sessionForkDisabledHint}
+                isTeam={isTeamChat}
               />
             )}
 
@@ -1106,6 +1350,7 @@ function ChatPageInner() {
               <MemoryMaintenanceBanner
                 status={memoryMaint}
                 blocking={memoryMaintBlocking}
+                connectionLost={memoryMaintConnectionLost}
               />
             )}
 
@@ -1143,18 +1388,27 @@ function ChatPageInner() {
                   noAgents={noAgents}
                   loading={agentsLoading}
                 />
+              ) : showWelcome && modelsReady && availableModels.length === 0 ? (
+                <ModelConfigEmpty canConfigure={canConfigureModels} />
               ) : showWelcome ? (
                 <WelcomeScreen
                   agentName={activeAgent?.name ?? null}
                   welcomeSuffix={welcomeSuffix}
                   quickCards={expertQuickCards}
                   onPromptClick={handlePromptClick}
-                  hideMascot={isStreaming}
+                  hideMascot={isStreaming || liveSpeakers.length > 0}
+                  isTeam={isTeamChat}
                 />
               ) : (
                 <ChatAgentProfileProvider
                   canOpen={Boolean(resolvedAgentId) && !sharedExpertViewer}
-                  onOpen={() => setAgentProfileOpen(true)}
+                  onOpen={(agentId) => {
+                    setProfileAgentId(
+                      agentId && agentId !== resolvedAgentId ? agentId : null,
+                    );
+                    setAgentProfileOpen(true);
+                  }}
+                  isTeam={isTeamChat}
                 >
                   <MessageList
                     messages={messages}
@@ -1167,9 +1421,9 @@ function ChatPageInner() {
                     onLoadMoreHistory={loadMoreHistory}
                     onRefreshHistory={refreshHistory}
                     isStreaming={isStreaming}
+                    liveSpeakers={liveSpeakers}
                     thinkingStartedAt={thinkingStartedAt}
                     sessionKey={activeThreadId ?? undefined}
-                    onCancel={cancelStream}
                     onRegenerate={handleRegenerate}
                     onEditUserMessage={handleEditUserMessage}
                     onForkAssistantMessage={handleForkAssistantMessage}
@@ -1178,13 +1432,9 @@ function ChatPageInner() {
                     onAcpPermissionSelect={handleAcpPermissionSelect}
                     onHitlDecision={handleHitlDecision}
                     onTurnRailVisibilityChange={setTurnRailVisible}
-                    onOpenBrowser={
-                      hasBrowserTool && !isMobile ? openBrowserTab : undefined
-                    }
+                    onOpenBrowser={hasBrowserTool ? openBrowserTab : undefined}
                     onEditFile={
-                      !sharedExpertViewer &&
-                      panelFilePaths.length > 0 &&
-                      !isMobile
+                      !sharedExpertViewer && panelFilePaths.length > 0
                         ? openFileList
                         : undefined
                     }
@@ -1196,7 +1446,6 @@ function ChatPageInner() {
             {!isMobile &&
               !dockOpen &&
               !agentProfileOpen &&
-              !workspaceDrawerOpen &&
               !trajectoryDrawerOpen && (
                 <div className={styles.chatFloatActions}>
                   {/* PWA install first when available — same column as browser / experts. */}
@@ -1204,7 +1453,7 @@ function ChatPageInner() {
                   {resolvedAgentId && !sharedExpertViewer && (
                     <>
                       <Tooltip
-                        title={t("chat.agentProfile.open")}
+                        title={profileOpenLabel}
                         mouseEnterDelay={0.35}
                         placement="left"
                       >
@@ -1213,9 +1462,9 @@ function ChatPageInner() {
                             type="button"
                             className={styles.agentProfileBtn}
                             onClick={() => setAgentProfileOpen(true)}
-                            aria-label={t("chat.agentProfile.open")}
+                            aria-label={profileOpenLabel}
                           >
-                            <GraduationCap size={20} strokeWidth={2.1} />
+                            <ProfileIcon size={20} strokeWidth={2.1} />
                           </button>
                         </span>
                       </Tooltip>
@@ -1233,7 +1482,7 @@ function ChatPageInner() {
                             type="button"
                             className={styles.chatFloatBtn}
                             disabled={!agentChatReady}
-                            onClick={() => setWorkspaceDrawerOpen(true)}
+                            onClick={toggleWorkspacePanel}
                             aria-label={t("chat.openWorkspace", "工作区")}
                           >
                             <FolderOpen size={20} strokeWidth={2.1} />
@@ -1388,6 +1637,55 @@ function ChatPageInner() {
                 </div>
               </div>
             ) : null}
+            {conversationMode === "plan" && pendingPlanPath ? (
+              <div className={styles.askQuestionDock}>
+                <div className={styles.askQuestionDockInner}>
+                  <PlanReadyCard
+                    path={pendingPlanPath}
+                    onExecute={() => {
+                      const path = pendingPlanPath;
+                      if (activeThreadId) {
+                        chatStore.setPendingPlanPath(activeThreadId, null);
+                      }
+                      handleConversationModeChange("craft", { persist: false });
+                      wrappedHandleSend(
+                        t("chat.conversationMode.executeUtterance", { path }),
+                        undefined,
+                        { conversationMode: "craft" },
+                      );
+                    }}
+                    onKeepEditing={() => chatInputRef.current?.focusComposer()}
+                  />
+                </div>
+              </div>
+            ) : null}
+            {!showWelcome && modelsReady && availableModels.length === 0 ? (
+              <div className={styles.modelConfigDock}>
+                <div className={styles.modelConfigDockInner}>
+                  <Alert
+                    type="info"
+                    showIcon
+                    message={t("modelConfig.promptTitle")}
+                    description={
+                      canConfigureModels
+                        ? t("modelConfig.promptMessage")
+                        : t("modelConfig.promptMessageNoPermission")
+                    }
+                    action={
+                      canConfigureModels ? (
+                        <Button
+                          type="primary"
+                          size="small"
+                          onClick={() => navigate("/admin/models")}
+                        >
+                          {t("modelConfig.configureButton")}
+                        </Button>
+                      ) : null
+                    }
+                  />
+                </div>
+              </div>
+            ) : null}
             <ChatInput
               ref={chatInputRef}
               onSend={wrappedHandleSend}
@@ -1398,6 +1696,7 @@ function ChatPageInner() {
               onCancel={cancelStream}
               onNewChat={handleNewChat}
               isStreaming={isStreaming}
+              isTeam={isTeamChat}
               disabled={!agentChatReady || noAgents || memoryMaintBlocking}
               initialText={prefillInputRef.current}
               onComposerCleared={() => {
@@ -1409,16 +1708,32 @@ function ChatPageInner() {
               reasoningMode={reasoningMode}
               reasoningEffort={reasoningEffort}
               onReasoningChange={handleReasoningChange}
-              availableConnectors={chatConnectors}
-              selectedConnectors={selectedConnectors}
-              onConnectorsChange={handleConnectorsChange}
-              availableKnowledgeBases={chatKnowledgeBases}
-              selectedKnowledgeBaseIds={selectedKnowledgeBaseIds}
-              onKnowledgeBaseIdsChange={handleKnowledgeBaseIdsChange}
-              availableSkills={chatSkills}
+              conversationMode={conversationMode}
+              onConversationModeChange={handleConversationModeChange}
+              hitlPolicy={hitlPolicy}
+              onHitlPolicyChange={
+                hitlEnabled ? handleComposerHitlPolicyChange : undefined
+              }
+              availableConnectors={isTeamChat ? undefined : chatConnectors}
+              selectedConnectors={isTeamChat ? [] : selectedConnectors}
+              onConnectorsChange={
+                isTeamChat ? undefined : handleConnectorsChange
+              }
+              availableKnowledgeBases={
+                isTeamChat ? undefined : chatKnowledgeBases
+              }
+              selectedKnowledgeBaseIds={
+                isTeamChat ? [] : selectedKnowledgeBaseIds
+              }
+              onKnowledgeBaseIdsChange={
+                isTeamChat ? undefined : handleKnowledgeBaseIdsChange
+              }
+              availableSkills={isTeamChat ? undefined : chatSkills}
               availableAgents={chatAgentOptions}
-              availableExperts={chatAgentOptionsPickable}
-              availableSubagents={chatSubagents}
+              availableExperts={
+                isTeamChat ? teamExpertOptions : chatAgentOptionsPickable
+              }
+              availableSubagents={isTeamChat ? undefined : chatSubagents}
               agentId={resolvedAgentId}
               threadId={activeThreadId}
               defaultModel={activeAgent?.default_model ?? null}
@@ -1435,33 +1750,32 @@ function ChatPageInner() {
             panelSizes={dockPanelSizes}
             agentId={resolvedAgentId ?? ""}
             filePaths={sharedExpertViewer ? [] : panelFilePaths}
+            agentNameById={dockAgentNameById}
             openTabs={openTabs}
             activeTabId={activeTabId}
             onSelectTab={setDockActiveTab}
             onCloseTab={closeDockTab}
             onOpenFile={openFileAt}
             browserEnvironment={browserEnvironment}
+            bridgeConnectionId={bridgeConnectionId}
             threadId={activeThreadId}
             isStreamingTurn={isStreaming}
             onModeChange={handleDockModeChange}
             onClose={handleDockClose}
             onResizeStart={dockHandleResizeStart}
+            addTab={dockAddTab}
           />
 
           {!sharedExpertViewer && (
-            <>
-              <AgentProfileDrawer
-                open={agentProfileOpen}
-                agent={activeAgent}
-                isMobile={isMobile}
-                onClose={() => setAgentProfileOpen(false)}
-              />
-              <WorkspaceDrawer
-                agentId={resolvedAgentId ?? ""}
-                open={workspaceDrawerOpen}
-                onClose={() => setWorkspaceDrawerOpen(false)}
-              />
-            </>
+            <AgentProfileDrawer
+              open={agentProfileOpen}
+              agent={profileAgent}
+              isMobile={isMobile}
+              onClose={() => {
+                setAgentProfileOpen(false);
+                setProfileAgentId(null);
+              }}
+            />
           )}
           {trajectoryEnabled && (
             <TrajectoryDrawer

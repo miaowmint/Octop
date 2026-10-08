@@ -7,6 +7,7 @@ interface SubagentCatalogDrawerProps {
   agentState: string;
   open: boolean;
   installedSlugs: Set<string>;
+  initialTab?: string;
   onClose: () => void;
   onInstalled: () => void;
 }
@@ -16,6 +17,7 @@ export default function SubagentCatalogDrawer({
   agentState,
   open,
   installedSlugs,
+  initialTab,
   onClose,
   onInstalled,
 }: SubagentCatalogDrawerProps) {
@@ -27,6 +29,7 @@ export default function SubagentCatalogDrawer({
       open={open}
       onClose={onClose}
       mobileBodyPadding={0}
+      agentId={agentId}
     >
       {/*
         Flex column + overflow:hidden so fillHeight SubagentManager gets a
@@ -44,9 +47,11 @@ export default function SubagentCatalogDrawer({
         }}
       >
         <SubagentManager
+          key={initialTab ?? "installed"}
           agentId={agentId}
           agentState={agentState}
           installedSlugs={installedSlugs}
+          initialTab={initialTab}
           onInstalled={onInstalled}
           fillHeight
         />

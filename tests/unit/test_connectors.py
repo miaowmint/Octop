@@ -200,16 +200,32 @@ def test_weknora_catalog_and_credentials():
 
 
 def test_weknora_rejects_non_https_remote_url():
-    with pytest.raises(ValueError, match="non-local url must use https"):
+    from octop.infra.errors import ErrorCode, OctopError
+
+    with pytest.raises(OctopError) as exc:
         validate_create_credentials(
             "weknora",
             {"base_url": "http://weknora.example.com", "api_key": "sk-secret"},
         )
+    assert exc.value.code is ErrorCode.CONNECTOR_MCP_HTTPS_REQUIRED
     with pytest.raises(ValueError, match="query string or fragment"):
         validate_create_credentials(
             "weknora",
             {"base_url": "https://weknora.example.com?token=secret"},
         )
+
+
+def test_weknora_allows_lan_http_base_url():
+    payload = validate_create_credentials(
+        "weknora",
+        {
+            "base_url": "http://10.0.0.5:8080/",
+            "api_key": "sk-secret",
+            "tenant_id": "tenant-1",
+            "knowledge_base_ids": "kb-1",
+        },
+    )
+    assert payload["base_url"] == "http://10.0.0.5:8080/api/v1"
 
 
 def test_dify_builds_streamable_http_spec():
@@ -744,6 +760,23 @@ def test_build_gateway_langchain_tools():
     )
     names = {t.name for t in tools}
     assert "tencent-ima__inst1_list_notes" in names
+    assert all(len(name) <= 64 for name in names)
+
+
+def test_build_gateway_langchain_tools_clamps_overlong_prefixed_names():
+    from octop.infra.connectors.gateway.langchain import build_gateway_langchain_tools
+
+    entry = get_catalog_entry("tencent-ima")
+    assert entry is not None
+    tools = build_gateway_langchain_tools(
+        entry=entry,
+        instance_id="inst1",
+        mcp_server_name="x" * 70,
+        creds={"api_key": "k", "client_id": "c"},
+    )
+    assert tools
+    assert all(len(t.name) <= 64 for t in tools)
+    assert all(t.name.replace("_", "").replace("-", "").isalnum() for t in tools)
 
 
 def test_gateway_search_news_passes_query(monkeypatch: pytest.MonkeyPatch):
@@ -1037,7 +1070,7 @@ def test_fliggy_exposes_only_nl_search_tools():
 
 
 def test_mcp_args_model_drops_nulls_before_validation():
-    from harness_agent.mcp import mcp_args_model
+    from octop_harness.mcp import mcp_args_model
 
     model = mcp_args_model(
         "search_place",

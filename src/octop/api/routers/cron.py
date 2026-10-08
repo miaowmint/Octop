@@ -9,10 +9,7 @@ from pydantic import BaseModel, Field
 
 from octop.api.common.agent import assert_agent_access, require_agent_row, user_owns_agent
 from octop.api.deps import current_user, get_server
-from octop.infra.agents.experts.catalog import (
-    normalize_task_examples_for_display,
-    read_workspace_manifest_task_examples,
-)
+from octop.infra.agents.experts.catalog import resolve_agent_display_task_examples
 from octop.infra.cron.task_type import (
     normalize_cron_task_type,
     require_cron_name,
@@ -27,7 +24,9 @@ router = APIRouter()
 
 class CronCreateBody(BaseModel):
     name: str | None = None
-    trigger: str
+    trigger: str = Field(
+        description="Examples: cron:0 9 * * *, interval:3600, date:2030-01-01T08:00:00, or agently:INSTANCE_ID for new mail events."
+    )
     prompt: str
     session_key: str | None = None
     fresh_thread: bool = False
@@ -39,7 +38,10 @@ class CronCreateBody(BaseModel):
 
 class CronPatchBody(BaseModel):
     name: str | None = None
-    trigger: str | None = None
+    trigger: str | None = Field(
+        default=None,
+        description="Time schedule or agently:INSTANCE_ID for new mail events.",
+    )
     prompt: str | None = None
     session_key: str | None = None
     fresh_thread: bool | None = None
@@ -50,11 +52,7 @@ class CronPatchBody(BaseModel):
 
 
 class CronExamplesResponse(BaseModel):
-    """Empty-state prompts for the tasks page.
-
-    ``task_examples`` is ``null`` when the workspace manifest has no such field,
-    so the dashboard can keep its built-in default cards.
-    """
+    """Compat mirror of welcome ``task_examples`` (workspace → catalog → name)."""
 
     task_examples: dict[str, list[str]] | None = None
 
@@ -96,17 +94,14 @@ async def cron_examples(
     user: Any = Depends(current_user),
     server: Any = Depends(get_server),
 ) -> CronExamplesResponse:
-    """Return ``task_examples`` from the agent workspace ``.octop/manifest.json``.
-
-    Missing field / missing manifest → ``task_examples: null`` (dashboard defaults).
-    """
+    """Same resolution as ``GET …/chat/welcome`` ``task_examples`` (API compat)."""
     assert_agent_access(server, agent_id, user)
     assert server.app_runtime is not None
-    workspace = server.app_runtime.agent_registry.workspace_for_agent(agent_id)
-    if workspace is None:
-        return CronExamplesResponse(task_examples=None)
-    examples = normalize_task_examples_for_display(
-        await read_workspace_manifest_task_examples(workspace)
+    registry = server.app_runtime.agent_registry
+    examples = await resolve_agent_display_task_examples(
+        workspace=registry.workspace_for_agent(agent_id),
+        row=registry.get_row(agent_id),
+        catalog=getattr(server, "expert_catalog", None),
     )
     return CronExamplesResponse(task_examples=examples)
 
@@ -134,7 +129,7 @@ async def create_cron(
     user: Any = Depends(current_user),
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
-    """Schedule a recurring prompt. `trigger` uses cron syntax or natural `@every` aliases."""
+    """Schedule a prompt on a timer or on new mail from a visible Agent Mail instance."""
     from octop.api.common.validators import validate_chat_mcp_servers  # noqa: PLC0415
     from octop.infra.cron.manager import CronCreateSpec  # noqa: PLC0415
 

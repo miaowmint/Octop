@@ -4,6 +4,8 @@ import {
   isOwnedExpert,
   isSharedExpertViewer,
   ownedExperts,
+  ownedSoloExperts,
+  ownedTeamAgents,
 } from "../../../utils/sharedExpert";
 
 describe("isSharedExpertViewer", () => {
@@ -55,5 +57,31 @@ describe("ownedExperts", () => {
     ]);
     expect(isOwnedExpert(agents[1]!)).toBe(false);
     expect(isOwnedExpert(agents[0]!)).toBe(true);
+  });
+});
+
+describe("ownedSoloExperts", () => {
+  it("drops team hosts from expert pickers", () => {
+    const agents = [
+      { agent_id: "writer", is_owner: true, kind: "expert" },
+      { agent_id: "crew", is_owner: true, kind: "team" },
+    ];
+    expect(ownedSoloExperts(agents).map((a) => a.agent_id)).toEqual(["writer"]);
+  });
+});
+
+describe("ownedTeamAgents", () => {
+  it("keeps owned team hosts only", () => {
+    const agents = [
+      { agent_id: "writer", is_owner: true, kind: "expert" },
+      { agent_id: "crew", is_owner: true, kind: "team" },
+      {
+        agent_id: "shared-crew",
+        is_shared: true,
+        is_owner: false,
+        kind: "team",
+      },
+    ];
+    expect(ownedTeamAgents(agents).map((a) => a.agent_id)).toEqual(["crew"]);
   });
 });
